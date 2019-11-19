@@ -176,6 +176,47 @@ class VLEntry:
             ret += " %s: %u" % (field, getattr(self, field))
         return ret+">"
 
+class MHBlockHeader:
+    # virtual fields, not on disk
+    size = 128
+    address = None
+    offset = None
+
+    _s = struct.Struct('>1I'+'2I'+'1I'+'4I'+'24I')
+
+    def __init__(self, buf, address):
+        self.address = address
+        self.offset = address + VLDB0.DBASE_OFFSET
+        vals = self._s.unpack(buf)
+        self.count = vals[0]
+        self.flags = vals[3]
+        self.cont = vals[4:8]
+
+    def __str__(self):
+        return "<MHBlockHeader: address %u>" % (self.address)
+
+    def __repr__(self):
+        return "<MHBlockHeader: address %u>" % (self.address)
+
+class MHBlock:
+    # virtual fields, not on disk
+    size = 8192
+    address = None
+    offset = None
+
+    def __init__(self, buf, address):
+        self.address = address
+        self.offset = address + VLDB0.DBASE_OFFSET
+        self.buf = buf
+        self.header = MHBlockHeader(buf, address)
+
+    def __str__(self):
+        return "<MHEntry: address: %u>" % (self.address)
+
+    def __repr__(self):
+        ret = "<MHEntry: address: '%s'" % (self.address)
+        return ret
+
 class VLDB0:
     HASHSIZE = 8191
     DBASE_OFFSET = 64
@@ -207,6 +248,10 @@ class VLDB0:
     def vlreadentry(self, address):
         buf = self.vlread(address, VLEntry._s.size)
         return VLEntry(buf, address)
+
+    def mhblock(self, address):
+        buf = self.vlread(address, MHBLock.size)
+        return MHBLock(buf, address)
 
     def _walk_hash(self, field_name, addr):
         while addr != 0:
@@ -284,5 +329,11 @@ def main(argv):
     for entry in vldb.walk_freelist():
         print("free entry: %r" % entry)
 
+def xyzzy():
+    vldb = VLDB0('vldb.DB0')
+    print("vlheader: %s" % vldb.vl_header)
+
+
 if __name__ == '__main__':
-    main(sys.argv)
+    #main(sys.argv)
+    xyzzy()
