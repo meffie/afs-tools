@@ -31,6 +31,10 @@
 import argparse
 import struct
 import sys
+try:
+    import hexdump
+except ImportError:
+    hexdump = None
 
 class UbikHeader:
     # 4-byte int
@@ -176,6 +180,99 @@ class VLEntry:
             ret += " %s: %u" % (field, getattr(self, field))
         return ret+">"
 
+class UUID:
+    def __init__(self, vals):
+        self.time_low = vals[0]
+        self.time_mid = vals[1]
+        self.time_hi = vals[2]
+        self.clock_hi = vals[3]
+        self.clock_lo = vals[4]
+        self.node = vals[5]
+
+    def __str__(self):
+        # todo
+        return "{0}-{1}-{2}-{3}{4}-{5}".format(
+            self.time_low,
+            self.time_mid,
+            self.time_hi,
+            self.clock_hi,
+            self.clock_lo,
+            self.node)
+
+    def __repr__(self):
+        return \
+            "<UUID:"\
+            " time_low {s.time_low}"\
+            " time_mid {s.time_mid}"\
+            " time_hi {s.time_hi}"\
+            " clock_hi {s.clock_hi}"\
+            " clock_lo {s.clock_lo}"\
+            " node {s.node}"\
+            ">".format(s=self)
+
+class MHBlockHeader:
+    # virtual fields, not on disk
+    address = None
+    offset = None
+
+    _s = struct.Struct('>1I'+'2I'+'1I'+'4I'+'24I')
+    size = _s.size
+    assert(size == 128)
+
+    def __init__(self, buf, address):
+        self.address = address
+        self.offset = address + VLDB0.DBASE_OFFSET
+        vals = self._s.unpack(buf)
+        self.count = vals[0]
+        self.flags = vals[3]
+        self.contaddr = vals[4:8]
+
+    def __str__(self):
+        # todo
+        return "<MHBlockHeader: address %u>" % (self.address)
+
+    def __repr__(self):
+        # todo
+        return "<MHBlockHeader: address %u>" % (self.address)
+
+class MHEntry:
+    # virtual fields, not on disk
+    block = None
+    index = None
+    address = None
+    offset = None
+
+    _s = struct.Struct('>1I'+'2H'+'2B'+'6B'+'1I'+'15I'+'1I'+'11I')
+    size = _s.size
+    assert(size == 128)
+
+    def __init__(self, buf, block, index, address):
+        self.block = block
+        self.index = index
+        self.address = address
+        self.offset = address + VLDB0.DBASE_OFFSET
+        vals = self._s.unpack(buf)
+        self.uuid = UUID(vals[0:6])
+        self.uniquifier = vals[6]
+        self.addrs = vals[7:22]
+        self.flags = vals[23]
+
+    def __str__(self):
+        return "todo"
+
+    def __repr__(self):
+        return \
+            "<MHEntry:"\
+            " address {s.address}"\
+            " offset {s.offset}"\
+            " block {s.block}"\
+            " index {s.index}"\
+            " uuid {s.uuid}"\
+            " uniquifier {s.uniquifier}"\
+            " flags {s.flags}"\
+            " addrs {s.addrs}"\
+            ">".format(s=self)
+
 class VLDB0:
     HASHSIZE = 8191
     DBASE_OFFSET = 64
@@ -195,10 +292,12 @@ class VLDB0:
     def hash_id(cls, volid):
         return volid % cls.HASHSIZE
 
-    def __init__(self, filename):
+    def __init__(self, filename='vldb.DB0'):
         self.fh = open(filename, 'rb')
         self.ubik_header = UbikHeader(fh=self.fh)
         self.vl_header = VLHeader(self.vlread(0, VLHeader._s.size))
+        self.mh_blocks = None
+        self.contaddr = None
 
     def vlread(self, address, size):
         self.fh.seek(address + self.DBASE_OFFSET)
@@ -207,6 +306,16 @@ class VLDB0:
     def vlreadentry(self, address):
         buf = self.vlread(address, VLEntry._s.size)
         return VLEntry(buf, address)
+
+    def mhreadentry(self, block, index):
+        if not self.contaddr:
+            address = self.vl_header.SIT
+            buf = self.vlread(address, MHBlockHeader.size)
+            bh = MHBlockHeader(buf, address)
+            self.contaddr = bh.contaddr
+        address = self.contaddr[block] + (index * MHEntry.size)
+        buf = self.vlread(address, MHEntry.size)
+        return MHEntry(buf, block, index, address)
 
     def _walk_hash(self, field_name, addr):
         while addr != 0:
@@ -262,6 +371,8 @@ class VLDB0:
             if entry.name == volname:
                 return entry
 
+VLDB = VLDB0 # alias
+
 def main(argv):
     parser = argparse.ArgumentParser()
     parser.add_argument('filename')
@@ -284,5 +395,7 @@ def main(argv):
     for entry in vldb.walk_freelist():
         print("free entry: %r" % entry)
 
+
 if __name__ == '__main__':
-    main(sys.argv)
+    #main(sys.argv)
+    pass
