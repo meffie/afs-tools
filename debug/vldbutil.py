@@ -31,10 +31,19 @@
 import argparse
 import struct
 import sys
+import binascii
 try:
     import hexdump
 except ImportError:
     hexdump = None
+
+def dump(name, data):
+    print('%s: length %d' % (name, len(data)))
+    if hexdump:
+        hexdump.hexdump(data)
+    else:
+        print(binascii.hexlify(data))
+    print('----')
 
 class UbikHeader:
     # 4-byte int
@@ -138,7 +147,6 @@ class VLEntry:
     nextIdHashRO = None
     nextIdHashBK = None
     nextNameHash = None
-
     # fixed-size string, 65 bytes
     name = None
 
@@ -181,13 +189,21 @@ class VLEntry:
         return ret+">"
 
 class UUID:
-    def __init__(self, vals):
-        self.time_low = vals[0]
-        self.time_mid = vals[1]
-        self.time_hi = vals[2]
-        self.clock_hi = vals[3]
-        self.clock_lo = vals[4]
-        self.node = vals[5]
+    _s = struct.Struct('>1I 2H 2B 6B')
+    size = _s.size
+
+    def __init__(self, time_low, time_mid, time_hi, clock_hi, clock_lo, node):
+        self.time_low = time_low
+        self.time_mid = time_mid
+        self.time_hi = time_hi
+        self.clock_hi = clock_hi
+        self.clock_lo = clock_lo
+        self.node = node
+
+    @classmethod
+    def from_bytes(cls, buf):
+        vals = self._s.unpack(buf)
+        return UUID(*vals)
 
     def __str__(self):
         # todo
@@ -211,15 +227,13 @@ class UUID:
             ">".format(s=self)
 
 class MHBlockHeader:
-    # virtual fields, not on disk
-    address = None
-    offset = None
-
-    _s = struct.Struct('>1I'+'2I'+'1I'+'4I'+'24I')
+    _s = struct.Struct('>1I 2I 1I 4I 24I')
     size = _s.size
     assert(size == 128)
 
     def __init__(self, buf, address):
+        dump('MHBlockHeader', buf)
+        self.raw = buf
         self.address = address
         self.offset = address + VLDB0.DBASE_OFFSET
         vals = self._s.unpack(buf)
@@ -236,23 +250,26 @@ class MHBlockHeader:
         return "<MHBlockHeader: address %u>" % (self.address)
 
 class MHEntry:
-    # virtual fields, not on disk
     block = None
     index = None
     address = None
     offset = None
 
-    _s = struct.Struct('>1I'+'2H'+'2B'+'6B'+'1I'+'15I'+'1I'+'11I')
+    _s = struct.Struct('>1I 2H 2B 6B 1I 15I 1I 11I')
     size = _s.size
     assert(size == 128)
 
     def __init__(self, buf, block, index, address):
+        dump('MHEntry', buf)
+        # virtual fields, not on disk
+        self.raw = buf
         self.block = block
         self.index = index
         self.address = address
         self.offset = address + VLDB0.DBASE_OFFSET
+        # decoded fields
         vals = self._s.unpack(buf)
-        self.uuid = UUID(vals[0:6])
+        self.uuid = UUID(*vals[0:6])
         self.uniquifier = vals[6]
         self.addrs = vals[7:22]
         self.flags = vals[23]
