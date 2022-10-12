@@ -22,6 +22,7 @@ Report free and used space on OpenAFS file servers.
 import argparse
 import json
 import re
+import socket
 import subprocess
 import sys
 
@@ -56,7 +57,7 @@ def humanize(kbytes):
 
 def vos(command, **kwargs):
     """
-    Execute a vos query command and return the stdout as a list of strings.
+    Execute a vos command and return the stdout as a list of strings.
     """
     args = ['vos', command]
     for name, value in kwargs.items():
@@ -66,14 +67,14 @@ def vos(command, **kwargs):
             args.append('-%s' % name)
         else:
             args.extend(['-%s' % name, value])
-    args.append('-noauth')
     proc = subprocess.Popen(args,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
     output = proc.communicate()[0].decode('utf-8')
     error = proc.communicate()[1].decode('utf-8')
-    if error:
-        sys.stderr.write('ERROR: {0}'.format(error))
+    for line in error.splitlines():
+        if 'running unauthenticated' not in line:
+            sys.stderr.write('ERROR: {0}'.format(line))
     return output.splitlines()
 
 
@@ -101,6 +102,7 @@ def lookup_servers(cell=None):
     for a in servers.values():
         if a:
             addrs.add(a[0])
+
     return list(addrs)
 
 
@@ -114,7 +116,7 @@ def calculate_used(free, total):
     else:
         used = total
     if total > 0:
-        usedp = (used / total) * 100.0
+        usedp = round((used / total) * 100.0, 1)
     else:
         usedp = 100.0
     if usedp < 0.1:
@@ -124,16 +126,29 @@ def calculate_used(free, total):
     return (used, usedp)
 
 
-def afsfree(cell, servers):
+def lookup_hostname(address):
+    """
+    Resolve the hostname from the IP address.
+    """
+    try:
+        hostname, _, _ = socket.gethostbyaddr(address)
+    except Exception as e:
+        sys.stderr.write('WARNING: failed to resolve '
+                         '{0}: {1}'.format(address), e)
+        hostname = address
+    return hostname
+
+
+def afsfree(cell, servers, noresolve):
     """
     Get the free, used, and total space on each partition on each server
     in the given cell.
     """
+    table = []
     if not servers:
         servers = lookup_servers(cell)
-
-    table = []
-    for server in sorted(set(servers)):
+    for server in set(servers):
+        hostname = server if noresolve else lookup_hostname(server)
         for partition in vos('partinfo', cell=cell, server=server):
             m = re.match(r'Free space on partition /vicep([a-z]+): '
                          r'(\d+) K blocks out of total (\d+)', partition)
@@ -142,7 +157,7 @@ def afsfree(cell, servers):
                 free = int(m.group(2))
                 total = int(m.group(3))
                 used, usedp = calculate_used(free, total)
-                row = (server, partid, total, used, free, usedp)
+                row = (hostname, partid, total, used, free, usedp)
                 table.append(row)
     return table
 
@@ -205,7 +220,7 @@ def main():
                         default='text')
     options = parser.parse_args()
 
-    table = afsfree(options.cell, options.servers)
+    table = afsfree(options.cell, options.servers, options.noresolve)
     if options.format == 'text':
         print_text(table)
     elif options.format == 'json':
