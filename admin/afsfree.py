@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 #
-# Report free space on afs servers.
-#
 # Copyright (c) 2016-2022, Sine Nomine Associates
 #
 # Permission to use, copy, modify, and/or distribute this software for any
@@ -17,12 +15,15 @@
 # OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 #
 
+"""
+Report free and used space on OpenAFS file servers.
+"""
+
 import argparse
 import json
 import re
 import subprocess
 import sys
-import pprint
 
 options = None
 
@@ -65,7 +66,9 @@ def vos(command, server=None):
         args.extend(['-cell', options.cell])
     if options and options.noresolve:
         args.append('-noresolve')
-    proc = subprocess.Popen(args, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    proc = subprocess.Popen(args,
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.PIPE)
     output = proc.communicate()[0].decode('utf-8')
     error = proc.communicate()[1].decode('utf-8')
     if error:
@@ -101,7 +104,7 @@ def afsfree():
     table = []
     for server in sorted(vos('listaddrs')):
         for partition in vos('partinfo', server=server):
-            m = re.match(r'Free space on partition /vicep([a-z]+): '\
+            m = re.match(r'Free space on partition /vicep([a-z]+): '
                          r'(\d+) K blocks out of total (\d+)', partition)
             if m:
                 partid = m.group(1)
@@ -142,7 +145,8 @@ def print_text(table):
     output = [('host', 'part', 'size', 'used', 'free', 'used%')]
     for r in table:
         usedp_str = '{:.0f}%'.format(r[5])
-        output.append((r[0], r[1], humanize(r[2]), humanize(r[3]), humanize(r[4]), usedp_str))
+        output.append((r[0], r[1], humanize(r[2]), humanize(r[3]),
+                      humanize(r[4]), usedp_str))
     template = make_template(output)
     for row in output:
         print(template.format(*row))
@@ -159,10 +163,12 @@ def print_raw(table):
 
 def main():
     global options
-    parser = argparse.ArgumentParser(description='Show used and available space on OpenAFS fileservers in a cell.')
+    parser = argparse.ArgumentParser(
+        description='Show free and used space on OpenAFS file servers.')
     parser.add_argument('--cell', '-cell')
     parser.add_argument('--noresolve', '-noresolve', action='store_true')
-    parser.add_argument('--format', '-format', choices=['text', 'json', 'raw'], default='text')
+    parser.add_argument('--format', '-format', choices=['text', 'json', 'raw'],
+                        default='text')
     options = parser.parse_args()
 
     table = afsfree()
@@ -173,7 +179,8 @@ def main():
     elif options.format == 'raw':
         print_raw(table)
     else:
-        raise AssertionError('Invalid format option: {}'.format(options.format))
+        raise AssertionError(
+            'Invalid format option: {}'.format(options.format))
 
 
 if __name__ == '__main__':
