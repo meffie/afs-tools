@@ -19,6 +19,8 @@
 Report free and used space on OpenAFS file servers.
 """
 
+from pprint import pprint as pp
+
 import argparse
 import json
 import re
@@ -55,13 +57,16 @@ def humanize(kbytes):
     return '{:.0f}{}'.format(value, unit)
 
 
-def vos(command, server=None):
+def vos(command, **kwargs):
     """
     Execute a vos query command and return the stdout as a list of strings.
     """
     args = ['vos', command, '-noauth']
-    if server:
-        args.extend(['-server', server])
+    for name, value in kwargs.items():
+        if value is True:
+            args.append('-%s' % name)
+        else:
+            args.extend(['-%s' % name, value])
     if options and options.cell:
         args.extend(['-cell', options.cell])
     if options and options.noresolve:
@@ -75,6 +80,9 @@ def vos(command, server=None):
         sys.stderr.write('ERROR: {0}'.format(error))
     return output.splitlines()
 
+def find_servers():
+    output = vos('listaddrs', printuuid=True)
+    pp(output)
 
 def calculate_used(free, total):
     """
@@ -102,7 +110,7 @@ def afsfree():
     in the given cell.
     """
     table = []
-    for server in sorted(vos('listaddrs')):
+    for server in sorted(set(vos('listaddrs'))):
         for partition in vos('partinfo', server=server):
             m = re.match(r'Free space on partition /vicep([a-z]+): '
                          r'(\d+) K blocks out of total (\d+)', partition)
@@ -116,63 +124,49 @@ def afsfree():
     return table
 
 
-def column_widths(table):
+def make_template(text_table):
     """
-    Calculate the column widths needed for virtical alignment.
-    """
-    min_width = 4
-    widths = []
-    for column in zip(*table):
-        widths.append(max([len(x) for x in column] + [min_width]))
-    return widths
+    Generate the format template for text output lines.
 
-
-def old_make_template(output):
+    Find the column format width for each table column. Left align the first
+    column and right align the rest of the columns.  The columns will be
+    vertically aligned when the output is printed with a monospaced font.
     """
-    Generate the format template.
-    """
-    t = []
-    for i, w in enumerate(column_widths(output)):
-        align = '<' if i == 0 else '>'
-        t.append('{%d:%c%d}' % (i, align, w))
-    return '  '.join(t)
-
-
-def make_template(strings):
-    """
-    Generate the plain text output line format template.
-    """
+    spacer = '   '
     column_formats = []
-    for i, column in enumerate(zip(*strings)):
+    for i, column in enumerate(zip(*text_table)):
         align = '<' if i == 0 else '>'
         width = max([len(s) for s in column])
         column_format = '{%d:%c%d}' % (i, align, width)
         column_formats.append(column_format)
-    return '   '.join(column_formats)
+    return spacer.join(column_formats)
 
 
 def print_text(table):
     """
-    Format the results as readable text table.
-
-    First, format each element as a string, then scan the strings to generate
-    the format template to so the data will be column aligned when printed with
-    a monospaced font.
+    Output the results as text table, one line per server/partition pair.
     """
-    strings = [('host', 'part', 'size', 'used', 'free', 'used%')]
-    for r in table:
-        strings.append((r[0], r[1], humanize(r[2]), humanize(r[3]),
-                       humanize(r[4]), '{:.0f}%'.format(r[5])))
-    template = make_template(strings)
-    for row in strings:
+    text_table = [('host', 'part', 'size', 'used', 'free', 'used%')]
+    for row in table:
+        server, part, size, used, free, usedp = row
+        text_table.append((server, part, humanize(size), humanize(used),
+                          humanize(free), '{:.0f}%'.format(usedp)))
+    template = make_template(text_table)
+    for row in text_table:
         print(template.format(*row))
 
 
 def print_json(table):
+    """
+    Output the results as json.
+    """
     print(json.dumps(table))
 
 
 def print_raw(table):
+    """
+    Output unformatted text, one line per server/partition pair.
+    """
     for row in table:
         print(' '.join([str(x) for x in row]))
 
@@ -186,6 +180,9 @@ def main():
     parser.add_argument('--format', '-format', choices=['text', 'json', 'raw'],
                         default='text')
     options = parser.parse_args()
+
+    find_servers()
+    return 0
 
     table = afsfree()
     if options.format == 'text':
