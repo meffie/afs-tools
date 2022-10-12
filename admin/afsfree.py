@@ -19,15 +19,12 @@
 Report free and used space on OpenAFS file servers.
 """
 
-from pprint import pprint as pp
-
 import argparse
 import json
 import re
 import subprocess
 import sys
 
-options = None
 
 KiB = 1024
 MiB = KiB * 1024
@@ -61,16 +58,15 @@ def vos(command, **kwargs):
     """
     Execute a vos query command and return the stdout as a list of strings.
     """
-    args = ['vos', command, '-noauth']
+    args = ['vos', command]
     for name, value in kwargs.items():
-        if value is True:
+        if value is None:
+            pass
+        elif value is True:
             args.append('-%s' % name)
         else:
             args.extend(['-%s' % name, value])
-    if options and options.cell:
-        args.extend(['-cell', options.cell])
-    if options and options.noresolve:
-        args.append('-noresolve')
+    args.append('-noauth')
     proc = subprocess.Popen(args,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
@@ -80,9 +76,33 @@ def vos(command, **kwargs):
         sys.stderr.write('ERROR: {0}'.format(error))
     return output.splitlines()
 
-def find_servers():
-    output = vos('listaddrs', printuuid=True)
-    pp(output)
+
+def lookup_servers(cell=None):
+    """
+    Lookup the file servers for this cell.
+    """
+    servers = {}
+    uuid = None
+    listaddrs = vos('listaddrs', cell=cell, printuuid=True, noresolve=True)
+    for i, line in enumerate(listaddrs):
+        if not line:
+            uuid = None
+        elif line.startswith('UUID:'):
+            uuid = line.replace('UUID:', '', 1).strip()
+            if uuid not in servers:
+                servers[uuid] = []
+        else:
+            if not uuid:
+                raise ValueError('Unexpected vos listaddrs output on line '
+                                 '{1}: {2}', i, line)
+            servers[uuid].append(line)
+
+    addrs = set()
+    for a in servers.values():
+        if a:
+            addrs.add(a[0])
+    return list(addrs)
+
 
 def calculate_used(free, total):
     """
@@ -104,14 +124,17 @@ def calculate_used(free, total):
     return (used, usedp)
 
 
-def afsfree():
+def afsfree(cell, servers):
     """
     Get the free, used, and total space on each partition on each server
     in the given cell.
     """
+    if not servers:
+        servers = lookup_servers(cell)
+
     table = []
-    for server in sorted(set(vos('listaddrs'))):
-        for partition in vos('partinfo', server=server):
+    for server in sorted(set(servers)):
+        for partition in vos('partinfo', cell=cell, server=server):
             m = re.match(r'Free space on partition /vicep([a-z]+): '
                          r'(\d+) K blocks out of total (\d+)', partition)
             if m:
@@ -172,19 +195,17 @@ def print_raw(table):
 
 
 def main():
-    global options
     parser = argparse.ArgumentParser(
         description='Show free and used space on OpenAFS file servers.')
+    parser.add_argument('--servers', '-servers', nargs='*',
+                        default=None)
     parser.add_argument('--cell', '-cell')
     parser.add_argument('--noresolve', '-noresolve', action='store_true')
     parser.add_argument('--format', '-format', choices=['text', 'json', 'raw'],
                         default='text')
     options = parser.parse_args()
 
-    find_servers()
-    return 0
-
-    table = afsfree()
+    table = afsfree(options.cell, options.servers)
     if options.format == 'text':
         print_text(table)
     elif options.format == 'json':
