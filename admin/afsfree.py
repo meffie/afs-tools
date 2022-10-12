@@ -127,7 +127,7 @@ def column_widths(table):
     return widths
 
 
-def make_template(output):
+def old_make_template(output):
     """
     Generate the format template.
     """
@@ -138,17 +138,33 @@ def make_template(output):
     return '  '.join(t)
 
 
+def make_template(strings):
+    """
+    Generate the plain text output line format template.
+    """
+    column_formats = []
+    for i, column in enumerate(zip(*strings)):
+        align = '<' if i == 0 else '>'
+        width = max([len(s) for s in column])
+        column_format = '{%d:%c%d}' % (i, align, width)
+        column_formats.append(column_format)
+    return '   '.join(column_formats)
+
+
 def print_text(table):
     """
     Format the results as readable text table.
+
+    First, format each element as a string, then scan the strings to generate
+    the format template to so the data will be column aligned when printed with
+    a monospaced font.
     """
-    output = [('host', 'part', 'size', 'used', 'free', 'used%')]
+    strings = [('host', 'part', 'size', 'used', 'free', 'used%')]
     for r in table:
-        usedp_str = '{:.0f}%'.format(r[5])
-        output.append((r[0], r[1], humanize(r[2]), humanize(r[3]),
-                      humanize(r[4]), usedp_str))
-    template = make_template(output)
-    for row in output:
+        strings.append((r[0], r[1], humanize(r[2]), humanize(r[3]),
+                       humanize(r[4]), '{:.0f}%'.format(r[5])))
+    template = make_template(strings)
+    for row in strings:
         print(template.format(*row))
 
 
