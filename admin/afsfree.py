@@ -22,8 +22,10 @@ import json
 import re
 import subprocess
 import sys
+import pprint
 
 options = None
+
 KiB = 1024
 MiB = KiB * 1024
 GiB = MiB * 1024
@@ -96,7 +98,7 @@ def afsfree():
     Get the free, used, and total space on each partition on each server
     in the given cell.
     """
-    rows = []
+    table = []
     for server in sorted(vos('listaddrs')):
         for partition in vos('partinfo', server=server):
             m = re.match(r'Free space on partition /vicep([a-z]+): '\
@@ -106,19 +108,53 @@ def afsfree():
                 free = int(m.group(2))
                 total = int(m.group(3))
                 used, usedp = calculate_used(free, total)
-                rows.append((server, partid, total, used, free, usedp))
-    return rows
+                row = (server, partid, total, used, free, usedp)
+                table.append(row)
+    return table
 
 
-def print_table(rows):
+def column_widths(table):
+    """
+    Calculate the column widths needed for virtical alignment.
+    """
+    min_width = 4
+    widths = []
+    for column in zip(*table):
+        widths.append(max([len(x) for x in column] + [min_width]))
+    return widths
+
+
+def make_template(output):
+    """
+    Generate the format template.
+    """
+    t = []
+    for i, w in enumerate(column_widths(output)):
+        align = '<' if i == 0 else '>'
+        t.append('{%d:%c%d}' % (i, align, w))
+    return '  '.join(t)
+
+
+def print_text(table):
     """
     Format the results as readable text table.
     """
-    maxnamelen = max([len(r[0]) for r in rows])
-    template = '{0:<' + str(maxnamelen) + '} {1:>4} {2:>6} {3:>6} {4:>6} {5:>4}%'
-    print(template.format('host', 'part', 'size', 'used', 'avail', 'used'))
-    for r in rows:
-        print(template.format(r[0], r[1], humanize(r[2]), humanize(r[3]), humanize(r[4]), int(round(r[5]))))
+    output = [('host', 'part', 'size', 'used', 'free', 'used%')]
+    for r in table:
+        usedp_str = '{:.0f}%'.format(r[5])
+        output.append((r[0], r[1], humanize(r[2]), humanize(r[3]), humanize(r[4]), usedp_str))
+    template = make_template(output)
+    for row in output:
+        print(template.format(*row))
+
+
+def print_json(table):
+    print(json.dumps(table))
+
+
+def print_raw(table):
+    for row in table:
+        print(' '.join([str(x) for x in row]))
 
 
 def main():
@@ -129,14 +165,15 @@ def main():
     parser.add_argument('--format', '-format', choices=['text', 'json', 'raw'], default='text')
     options = parser.parse_args()
 
-    rows = afsfree()
+    table = afsfree()
     if options.format == 'text':
-        print_table(rows)
+        print_text(table)
     elif options.format == 'json':
-        print(json.dumps(rows))
+        print_json(table)
     elif options.format == 'raw':
-        for row in rows:
-            print(' '.join([str(x) for x in row]))
+        print_raw(table)
+    else:
+        raise AssertionError('Invalid format option: {}'.format(options.format))
 
 
 if __name__ == '__main__':
