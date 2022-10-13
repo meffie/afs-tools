@@ -19,22 +19,38 @@
 Report free and used space on OpenAFS file servers.
 """
 
-from pprint import pprint as pp
-
 import argparse
 import json
+import os
 import re
 import socket
 import subprocess
 import sys
 
+DEBUG = os.environ.get('AFSFREE_DEBUG', '0') == '1'
 
 KiB = 1024
 MiB = KiB * 1024
 GiB = MiB * 1024
 TiB = GiB * 1024
 
-HEADINGS = ('host', 'part', 'size', 'used', 'free', 'used%')
+
+def debug(msg):
+    if DEBUG:
+        sys.stderr.write('DEBUG: {0}\n'.format(msg))
+
+
+def warning(msg):
+    sys.stderr.write('WARNING: {0}\n'.format(msg))
+
+
+def error(msg):
+    sys.stderr.write('ERROR: {0}\n'.format(msg))
+
+
+def fatal(msg):
+    raise AssertionError(msg)
+
 
 def humanize(kbytes):
     """
@@ -58,6 +74,27 @@ def humanize(kbytes):
     return '{:.0f}{}'.format(value, unit)
 
 
+def lookup_hostname(address):
+    """
+    Resolve the hostname from the IP address.
+    """
+    try:
+        hostname, _, _ = socket.gethostbyaddr(address)
+    except Exception as e:
+        warning('Failed to resolve {0}: {1}'.format(address, e))
+        hostname = None
+    return hostname
+
+
+#def lookup_address(hostname):
+#    try:
+#        address = socket.gethostbyname(hostname)
+#    except Exception as e:
+#        warning('Failed to resolve {0}: {1}\n'.format(hostname), e)
+#        address = None
+#    return address
+
+
 def vos(command, **kwargs):
     """
     Execute a vos command and return the stdout as a list of strings.
@@ -70,22 +107,27 @@ def vos(command, **kwargs):
             args.append('-%s' % name)
         else:
             args.extend(['-%s' % name, value])
-    sys.stdout.write('DEBUG: Running {0}\n'.format(' '.join(args)))
+    debug('Running {0}'.format(' '.join(args)))
     proc = subprocess.Popen(args,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
-    output = proc.communicate()[0].decode('utf-8')
-    error = proc.communicate()[1].decode('utf-8')
-    for line in error.splitlines():
+    output = proc.communicate()[0].decode('utf-8').splitlines()
+    errors = proc.communicate()[1].decode('utf-8').splitlines()
+    for line in errors:
+        # Suppress unauth noise.
         if 'running unauthenticated' not in line:
-            sys.stderr.write('ERROR: {0}\n'.format(line))
-    return output.splitlines()
+            error(line)
+    for line in output:
+        debug(line)
+    return output
 
 
 def lookup_servers(cell=None):
     """
     Lookup the file servers for this cell.
     """
+    # Run vos listaddrs to get the list of registered file servers and the
+    # list of ip addresses for each server.
     file_servers = {}
     uuid = None
     listaddrs = vos('listaddrs', cell=cell, printuuid=True, noresolve=True)
@@ -102,12 +144,15 @@ def lookup_servers(cell=None):
                                  '{1}: {2}', i, line)
             file_servers[uuid].append(line)
 
-    addrs = set()
-    for a in file_servers.values():
-        if a:
-            addrs.add(a[0])   # try just this one?
-
-    return list(addrs)
+    # Try each multi-homed address to find a hostname for the server.
+    servers = set()
+    for addresses in file_servers.values():
+        for address in addresses:
+            hostname = lookup_hostname(address)
+            if hostname:
+                servers.add(hostname)
+                break
+    return list(servers)
 
 
 def calculate_used(free, total):
@@ -130,29 +175,6 @@ def calculate_used(free, total):
     return (used, usedp)
 
 
-def lookup_hostname(address):
-    """
-    Resolve the hostname from the IP address.
-    """
-    try:
-        hostname, _, _ = socket.gethostbyaddr(address)
-    except Exception as e:
-        sys.stderr.write('WARNING: failed to resolve '
-                         '{0}: {1}\n'.format(address), e)
-        hostname = address
-    return hostname
-
-
-def lookup_address(hostname):
-    try:
-        address = socket.gethostbyname(hostname)
-    except Exception as e:
-        sys.stderr.write('WARNING: failed to resolve '
-                         '{0}: {1}\n'.format(hostname), e)
-        address = hostname
-    return address
-
-
 def get_partinfo(cell, server):
     parts = {}
     output = vos('partinfo', cell=cell, server=server)
@@ -162,9 +184,9 @@ def get_partinfo(cell, server):
         if m:
             partid = m.group(1)
             free = int(m.group(2))
-            total = int(m.group(3))
-            used, usedp = calculate_used(free, total)
-            parts[partid] = dict(total=total, used=used, free=free, usedp=usedp)
+            size = int(m.group(3))
+            used, usedp = calculate_used(free, size)
+            parts[partid] = dict(size=size, used=used, free=free, usedp=usedp)
     return parts
 
 
@@ -179,6 +201,17 @@ def afsfree(cell, servers):
     for server in servers:
         results[server] = get_partinfo(cell, server)
     return results
+
+
+def flatten(results):
+    """
+    Flatten the server and partition dicts to a list of tuples.
+    """
+    table = []
+    for host, parts in results.items():
+        for part, info in parts.items():
+            table.append((host, part, info['size'], info['used'], info['free'], info['usedp']))
+    return table
 
 
 def make_template(text_table):
@@ -198,50 +231,37 @@ def make_template(text_table):
         column_formats.append(column_format)
     return spacer.join(column_formats)
 
-def flatten(tree):
-    table = []
-    for key0, values0 in tree.items():
-        for key1, values1 in values0.items():
-            table.amend(dict(host=key0, part=key1, **values1))
-    return table
-
-def print_text(table, sort):
+def print_text(results):
     """
     Output the results as text table, one line per server/partition pair.
     """
-    #text_table = [HEADINGS]
-    text_table = []
+    table = [('host', 'part', 'size', 'used', 'free', 'used%')]
+    for row in sorted(flatten(results)):
+        host = row[0]
+        part = row[1]
+        size = humanize(row[2])
+        used = humanize(row[3])
+        free = humanize(row[4])
+        usedp = '{:.0f}%'.format(row[5])
+        table.append((host, part, size, used, free, usedp))
+    template = make_template(table)
     for row in table:
-        site, size, used, free, usedp = row
-        server, part = site
-        text_table.append((server, part, humanize(size), humanize(used),
-                          humanize(free), '{:.0f}%'.format(usedp)))
-
-    pp(text_table)
-    if sort:
-        print(sort)
-        return
-
-    template = make_template(text_table)
-    for row in text_table:
         print(template.format(*row))
 
 
-def print_json(table):
+def print_plain(results):
     """
-    Output the results as json.
+    Output the results as one line per server/partition pair.
     """
-    print(json.dumps(table))
+    for row in sorted(flatten(results)):
+        print(' '.join([str(x) for x in row]))
 
 
-def print_raw(table):
+def print_json(results):
     """
-    Output unformatted text, one line per server/partition pair.
+    Output the results in json format.
     """
-    for hostname, info in table.items():
-        for partid, part in info['parts'].items():
-            values = [hostname, info['ip'], partid] + part.values()
-            print(' '.join([str(x) for x in values]))
+    print(json.dumps(results))
 
 
 def main():
@@ -250,26 +270,19 @@ def main():
     parser.add_argument('--servers', '-servers', nargs='*',
                         default=None)
     parser.add_argument('--cell', '-cell')
-    parser.add_argument('--format', '-format', choices=['text', 'json', 'raw'],
+    parser.add_argument('--format', '-format', choices=['text', 'plain', 'json'],
                         default='text')
-    parser.add_argument('--sort', '-sort', choices=[HEADINGS],
-                        default=HEADINGS[0])
-
     options = parser.parse_args()
 
     results = afsfree(options.cell, options.servers)
-    pp(results)
-    return 0
-
     if options.format == 'text':
-        print_text(results, options.sort)
+        print_text(results)
+    elif options.format == 'plain':
+        print_plain(results)
     elif options.format == 'json':
         print_json(results)
-    elif options.format == 'raw':
-        print_raw(results)
     else:
-        raise AssertionError(
-            'Invalid format option: {}'.format(options.format))
+        fatal('Invalid -format option: {}'.format(options.format))
 
 
 if __name__ == '__main__':
