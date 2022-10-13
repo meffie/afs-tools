@@ -86,15 +86,6 @@ def lookup_hostname(address):
     return hostname
 
 
-#def lookup_address(hostname):
-#    try:
-#        address = socket.gethostbyname(hostname)
-#    except Exception as e:
-#        warning('Failed to resolve {0}: {1}\n'.format(hostname), e)
-#        address = None
-#    return address
-
-
 def vos(command, **kwargs):
     """
     Execute a vos command and return the stdout as a list of strings.
@@ -210,7 +201,8 @@ def flatten(results):
     table = []
     for host, parts in results.items():
         for part, info in parts.items():
-            table.append((host, part, info['size'], info['used'], info['free'], info['usedp']))
+            table.append((host, part, info['size'], info['used'],
+                         info['free'], info['usedp']))
     return table
 
 
@@ -230,6 +222,7 @@ def make_template(text_table):
         column_format = '{%d:%c%d}' % (i, align, width)
         column_formats.append(column_format)
     return spacer.join(column_formats)
+
 
 def print_text(results):
     """
@@ -270,8 +263,8 @@ def main():
     parser.add_argument('--servers', '-servers', nargs='*',
                         default=None)
     parser.add_argument('--cell', '-cell')
-    parser.add_argument('--format', '-format', choices=['text', 'plain', 'json'],
-                        default='text')
+    parser.add_argument('--format', '-format',
+                        choices=['text', 'plain', 'json'], default='text')
     options = parser.parse_args()
 
     results = afsfree(options.cell, options.servers)
