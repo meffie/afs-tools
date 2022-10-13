@@ -19,6 +19,8 @@
 Report free and used space on OpenAFS file servers.
 """
 
+from pprint import pprint as pp
+
 import argparse
 import json
 import re
@@ -32,6 +34,7 @@ MiB = KiB * 1024
 GiB = MiB * 1024
 TiB = GiB * 1024
 
+HEADINGS = ('host', 'part', 'size', 'used', 'free', 'used%')
 
 def humanize(kbytes):
     """
@@ -67,6 +70,7 @@ def vos(command, **kwargs):
             args.append('-%s' % name)
         else:
             args.extend(['-%s' % name, value])
+    sys.stdout.write('DEBUG: Running {0}\n'.format(' '.join(args)))
     proc = subprocess.Popen(args,
                             stdout=subprocess.PIPE,
                             stderr=subprocess.PIPE)
@@ -74,7 +78,7 @@ def vos(command, **kwargs):
     error = proc.communicate()[1].decode('utf-8')
     for line in error.splitlines():
         if 'running unauthenticated' not in line:
-            sys.stderr.write('ERROR: {0}'.format(line))
+            sys.stderr.write('ERROR: {0}\n'.format(line))
     return output.splitlines()
 
 
@@ -82,7 +86,7 @@ def lookup_servers(cell=None):
     """
     Lookup the file servers for this cell.
     """
-    servers = {}
+    file_servers = {}
     uuid = None
     listaddrs = vos('listaddrs', cell=cell, printuuid=True, noresolve=True)
     for i, line in enumerate(listaddrs):
@@ -90,18 +94,18 @@ def lookup_servers(cell=None):
             uuid = None
         elif line.startswith('UUID:'):
             uuid = line.replace('UUID:', '', 1).strip()
-            if uuid not in servers:
-                servers[uuid] = []
+            if uuid not in file_servers:
+                file_servers[uuid] = []
         else:
             if not uuid:
                 raise ValueError('Unexpected vos listaddrs output on line '
                                  '{1}: {2}', i, line)
-            servers[uuid].append(line)
+            file_servers[uuid].append(line)
 
     addrs = set()
-    for a in servers.values():
+    for a in file_servers.values():
         if a:
-            addrs.add(a[0])
+            addrs.add(a[0])   # try just this one?
 
     return list(addrs)
 
@@ -134,32 +138,47 @@ def lookup_hostname(address):
         hostname, _, _ = socket.gethostbyaddr(address)
     except Exception as e:
         sys.stderr.write('WARNING: failed to resolve '
-                         '{0}: {1}'.format(address), e)
+                         '{0}: {1}\n'.format(address), e)
         hostname = address
     return hostname
 
 
-def afsfree(cell, servers, noresolve):
+def lookup_address(hostname):
+    try:
+        address = socket.gethostbyname(hostname)
+    except Exception as e:
+        sys.stderr.write('WARNING: failed to resolve '
+                         '{0}: {1}\n'.format(hostname), e)
+        address = hostname
+    return address
+
+
+def get_partinfo(cell, server):
+    parts = {}
+    output = vos('partinfo', cell=cell, server=server)
+    for partition in output:
+        m = re.match(r'Free space on partition /vicep([a-z]+): '
+                     r'(\d+) K blocks out of total (\d+)', partition)
+        if m:
+            partid = m.group(1)
+            free = int(m.group(2))
+            total = int(m.group(3))
+            used, usedp = calculate_used(free, total)
+            parts[partid] = dict(total=total, used=used, free=free, usedp=usedp)
+    return parts
+
+
+def afsfree(cell, servers):
     """
     Get the free, used, and total space on each partition on each server
     in the given cell.
     """
-    table = []
+    results = {}
     if not servers:
         servers = lookup_servers(cell)
-    for server in set(servers):
-        hostname = server if noresolve else lookup_hostname(server)
-        for partition in vos('partinfo', cell=cell, server=server):
-            m = re.match(r'Free space on partition /vicep([a-z]+): '
-                         r'(\d+) K blocks out of total (\d+)', partition)
-            if m:
-                partid = m.group(1)
-                free = int(m.group(2))
-                total = int(m.group(3))
-                used, usedp = calculate_used(free, total)
-                row = (hostname, partid, total, used, free, usedp)
-                table.append(row)
-    return table
+    for server in servers:
+        results[server] = get_partinfo(cell, server)
+    return results
 
 
 def make_template(text_table):
@@ -179,16 +198,30 @@ def make_template(text_table):
         column_formats.append(column_format)
     return spacer.join(column_formats)
 
+def flatten(tree):
+    table = []
+    for key0, values0 in tree.items():
+        for key1, values1 in values0.items():
+            table.amend(dict(host=key0, part=key1, **values1))
+    return table
 
-def print_text(table):
+def print_text(table, sort):
     """
     Output the results as text table, one line per server/partition pair.
     """
-    text_table = [('host', 'part', 'size', 'used', 'free', 'used%')]
+    #text_table = [HEADINGS]
+    text_table = []
     for row in table:
-        server, part, size, used, free, usedp = row
+        site, size, used, free, usedp = row
+        server, part = site
         text_table.append((server, part, humanize(size), humanize(used),
                           humanize(free), '{:.0f}%'.format(usedp)))
+
+    pp(text_table)
+    if sort:
+        print(sort)
+        return
+
     template = make_template(text_table)
     for row in text_table:
         print(template.format(*row))
@@ -205,8 +238,10 @@ def print_raw(table):
     """
     Output unformatted text, one line per server/partition pair.
     """
-    for row in table:
-        print(' '.join([str(x) for x in row]))
+    for hostname, info in table.items():
+        for partid, part in info['parts'].items():
+            values = [hostname, info['ip'], partid] + part.values()
+            print(' '.join([str(x) for x in values]))
 
 
 def main():
@@ -215,18 +250,23 @@ def main():
     parser.add_argument('--servers', '-servers', nargs='*',
                         default=None)
     parser.add_argument('--cell', '-cell')
-    parser.add_argument('--noresolve', '-noresolve', action='store_true')
     parser.add_argument('--format', '-format', choices=['text', 'json', 'raw'],
                         default='text')
+    parser.add_argument('--sort', '-sort', choices=[HEADINGS],
+                        default=HEADINGS[0])
+
     options = parser.parse_args()
 
-    table = afsfree(options.cell, options.servers, options.noresolve)
+    results = afsfree(options.cell, options.servers)
+    pp(results)
+    return 0
+
     if options.format == 'text':
-        print_text(table)
+        print_text(results, options.sort)
     elif options.format == 'json':
-        print_json(table)
+        print_json(results)
     elif options.format == 'raw':
-        print_raw(table)
+        print_raw(results)
     else:
         raise AssertionError(
             'Invalid format option: {}'.format(options.format))
