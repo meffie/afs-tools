@@ -52,26 +52,26 @@ def fatal(msg):
     raise AssertionError(msg)
 
 
-def humanize(kbytes):
+def humanize(size):
     """
-    Convert KiB bytes to more human readable units.
+    Convert bytes to human readable units.
     """
-    if kbytes >= TiB:
-        value = kbytes / TiB
-        unit = 'P'
-    elif kbytes >= GiB:
-        value = kbytes / GiB
+    if size >= TiB:
+        value = size / TiB
         unit = 'T'
-    elif kbytes >= MiB:
-        value = kbytes / MiB
+    elif size >= GiB:
+        value = size / GiB
         unit = 'G'
-    elif kbytes >= KiB:
-        value = kbytes / KiB
+    elif size >= MiB:
+        value = size / MiB
         unit = 'M'
-    else:
-        value = float(kbytes)
+    elif size >= KiB:
+        value = size / KiB
         unit = 'K'
-    return '{:.0f}{}'.format(value, unit)
+    else:
+        value = float(size)
+        unit = ''
+    return '{0:.0f}{1}'.format(value, unit)
 
 
 def lookup_hostname(address):
@@ -80,15 +80,29 @@ def lookup_hostname(address):
     """
     try:
         hostname, _, _ = socket.gethostbyaddr(address)
+        debug('{0} -> {1}'.format(address, hostname))
     except Exception as e:
         warning('Failed to resolve {0}: {1}'.format(address, e))
         hostname = None
     return hostname
 
 
+def lookup_address(hostname):
+    """
+    Resolve the IP address from the hostname.
+    """
+    try:
+        address = socket.gethostbyname(hostname)
+        debug('{0} -> {1}'.format(hostname, address))
+    except Exception as e:
+        warning('Failed to resolve {0}: {1}'.format(address, e))
+        address = None
+    return address
+
+
 def vos(command, **kwargs):
     """
-    Execute a vos command and return the stdout as a list of strings.
+    Execute a vos command and return stdout as a list of strings.
     """
     args = ['vos', command]
     for name, value in kwargs.items():
@@ -105,8 +119,7 @@ def vos(command, **kwargs):
     output = proc.communicate()[0].decode('utf-8').splitlines()
     errors = proc.communicate()[1].decode('utf-8').splitlines()
     for line in errors:
-        # Suppress unauth noise.
-        if 'running unauthenticated' not in line:
+        if 'running unauthenticated' not in line:  # Suppress unauth noise.
             error(line)
     for line in output:
         debug(line)
@@ -134,15 +147,16 @@ def lookup_servers(cell=None):
                 raise ValueError('Unexpected vos listaddrs output on line '
                                  '{1}: {2}', i, line)
             file_servers[uuid].append(line)
-
     # Try each multi-homed address to find a hostname for the server.
     servers = set()
     for addresses in file_servers.values():
         for address in addresses:
             hostname = lookup_hostname(address)
-            if hostname:
+            if hostname and lookup_address(hostname):
                 servers.add(hostname)
                 break
+        else:
+            fatal('hostname not found for {0}'.format(','.format(addresses)))
     return list(servers)
 
 
@@ -167,15 +181,17 @@ def calculate_used(free, total):
 
 
 def get_partinfo(cell, server):
+    """
+    Get the file server partition information.
+    """
     parts = {}
-    output = vos('partinfo', cell=cell, server=server)
-    for partition in output:
+    for partition in vos('partinfo', cell=cell, server=server):
         m = re.match(r'Free space on partition /vicep([a-z]+): '
                      r'(\d+) K blocks out of total (\d+)', partition)
         if m:
             partid = m.group(1)
-            free = int(m.group(2))
-            size = int(m.group(3))
+            free = int(m.group(2)) * KiB
+            size = int(m.group(3)) * KiB
             used, usedp = calculate_used(free, size)
             parts[partid] = dict(size=size, used=used, free=free, usedp=usedp)
     return parts
@@ -183,8 +199,7 @@ def get_partinfo(cell, server):
 
 def afsfree(cell, servers):
     """
-    Get the free, used, and total space on each partition on each server
-    in the given cell.
+    Get the partition info for the servers in a cell.
     """
     results = {}
     if not servers:
@@ -199,9 +214,9 @@ def flatten(results):
     Flatten the server and partition dicts to a list of tuples.
     """
     table = []
-    for host, parts in results.items():
+    for server, parts in results.items():
         for part, info in parts.items():
-            table.append((host, part, info['size'], info['used'],
+            table.append((server, part, info['size'], info['used'],
                          info['free'], info['usedp']))
     return table
 
@@ -211,13 +226,14 @@ def make_template(text_table):
     Generate the format template for text output lines.
 
     Find the column format width for each table column. Left align the first
-    column and right align the rest of the columns.  The columns will be
-    vertically aligned when the output is printed with a monospaced font.
+    and second column and right align the rest of the columns.  The columns
+    will be vertically aligned when the output is printed with a monospaced
+    font.
     """
     spacer = '   '
     column_formats = []
     for i, column in enumerate(zip(*text_table)):
-        align = '<' if i == 0 else '>'
+        align = '<' if i == 0 or i == 1 else '>'
         width = max([len(s) for s in column])
         column_format = '{%d:%c%d}' % (i, align, width)
         column_formats.append(column_format)
@@ -226,17 +242,17 @@ def make_template(text_table):
 
 def print_text(results):
     """
-    Output the results as text table, one line per server/partition pair.
+    Output the results as text table with one line per server/partition pair.
     """
-    table = [('host', 'part', 'size', 'used', 'free', 'used%')]
+    table = [('server', 'part', 'size', 'used', 'free', 'used%')]
     for row in sorted(flatten(results)):
-        host = row[0]
+        server = row[0]
         part = row[1]
         size = humanize(row[2])
         used = humanize(row[3])
         free = humanize(row[4])
         usedp = '{:.0f}%'.format(row[5])
-        table.append((host, part, size, used, free, usedp))
+        table.append((server, part, size, used, free, usedp))
     template = make_template(table)
     for row in table:
         print(template.format(*row))
